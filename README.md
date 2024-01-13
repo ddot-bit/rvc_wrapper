@@ -1,3 +1,15 @@
+TODO:
+- wrap fairseq lib into python module
+- wrap base models into python module
+- wrap AICoverGen into python module
+- clean up dependencies that are defined in pyproject.toml
+
+- Update mx module to support cpu processing
+    - MDX.__init__
+    - run_mdx
+    - voice_change
+    - PYTORCH_ENABLE_MPS_FALLBACK=1 
+    
 # AICoverGen
 An autonomous pipeline to create covers with any RVC v2 trained AI voice from YouTube videos or a local audio file. For developers who may want to add a singing functionality into their AI assistant/chatbot/vtuber, or for people who want to hear their favourite characters sing their favourite song.
 
