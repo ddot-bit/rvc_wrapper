@@ -2,6 +2,7 @@
 mdxnet_models/*.onnx
 
 # RVC Models
+rvc_models*
 rvc_models/*/*.pth
 rvc_models/*/*.index
 rvc_models/*/*.npy
@@ -133,6 +134,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+temp*
 
 # Spyder project settings
 .spyderproject
