@@ -2,6 +2,7 @@
 mdxnet_models/*.onnx
 
 # RVC Models
+rvc_models/*
 rvc_models/*/*.pth
 rvc_models/*/*.index
 rvc_models/*/*.npy
@@ -9,6 +10,7 @@ rvc_models/hubert_base.pt
 rvc_models/rmvpe.pt
 
 # Output
+song_output/*
 song_output/*/*.wav
 song_output/*/*.mp3
 

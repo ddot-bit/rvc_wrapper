@@ -5,18 +5,20 @@ import faiss
 import librosa
 import numpy as np
 import os
-import parselmouth
-import pyworld
+
+# import parselmouth
+# import pyworld
 import sys
 import torch
 import torch.nn.functional as F
-import torchcrepe
+
+# import torchcrepe
 import traceback
 from scipy import signal
 from torch import Tensor
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-now_dir = os.path.join(BASE_DIR, 'src')
+now_dir = os.path.join(BASE_DIR, "src")
 sys.path.append(now_dir)
 
 bh, ah = signal.butter(N=5, Wn=48, btype="high", fs=16000)
@@ -86,8 +88,9 @@ class VC(object):
             return torch.device(
                 f"cuda:{index % torch.cuda.device_count()}"
             )  # Very fast
-        elif torch.backends.mps.is_available():
-            return torch.device("mps")
+        # TODO: mps integration and sync tensor dtypes
+        # elif torch.backends.mps.is_available():
+        #     return torch.device("mps")
         # Insert an else here to grab "xla" devices if available. TO DO later. Requires the torch_xla.core.xla_model library
         # Else wise return the "cpu" as a torch device,
         return torch.device("cpu")
@@ -324,7 +327,9 @@ class VC(object):
                 from rmvpe import RMVPE
 
                 self.model_rmvpe = RMVPE(
-                    os.path.join(BASE_DIR, 'rvc_models', 'rmvpe.pt'), is_half=self.is_half, device=self.device
+                    os.path.join(BASE_DIR, "rvc_models", "rmvpe.pt"),
+                    is_half=self.is_half,
+                    device=self.device,
                 )
             f0 = self.model_rmvpe.infer_from_audio(x, thred=0.03)
 
@@ -365,7 +370,7 @@ class VC(object):
         ) + 1
         f0_mel[f0_mel <= 1] = 1
         f0_mel[f0_mel > 255] = 255
-        f0_coarse = np.rint(f0_mel).astype(np.int)
+        f0_coarse = np.rint(f0_mel).astype(int)
 
         return f0_coarse, f0bak  # 1-0
 
