@@ -19,7 +19,7 @@ from pedalboard import Pedalboard, Reverb, Compressor, HighpassFilter
 from pedalboard.io import AudioFile
 from pydub import AudioSegment
 
-from mdx import run_mdx
+from transform.mdx_process import MdxProcess
 from rvc import Config, load_hubert, get_vc, rvc_infer
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -27,6 +27,20 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 mdxnet_models_dir = os.path.join(BASE_DIR, "mdxnet_models")
 rvc_models_dir = os.path.join(BASE_DIR, "rvc_models")
 output_dir = os.path.join(BASE_DIR, "song_output")
+
+
+def cleanup_files(keep_files, is_webui, progress):
+    # TODO: update logic
+    if not keep_files:
+        display_progress(
+            "[~] Removing intermediate audio files...", 0.95, is_webui, progress
+        )
+        intermediate_files = [vocals_path, main_vocals_path, ai_vocals_mixed_path]
+        if pitch_change_all != 0:
+            intermediate_files += [instrumentals_path, backup_vocals_path]
+        for file in intermediate_files:
+            if file and os.path.exists(file):
+                os.remove(file)
 
 
 def get_youtube_video_id(url, ignore_playlist=True):
@@ -194,47 +208,20 @@ def preprocess_song(
     display_progress(
         "[~] Separating Vocals from Instrumental...", 0.1, is_webui, progress
     )
-    vocals_path, instrumentals_path = run_mdx(
-        mdx_model_params,
-        song_output_dir,
-        os.path.join(mdxnet_models_dir, "UVR-MDX-NET-Voc_FT.onnx"),
-        orig_song_path,
-        denoise=True,
-        keep_orig=keep_orig,
+    extract_audio_process = MdxProcess(
+        song_output_dir=song_output_dir,
+        orig_song_path=orig_song_path,
+        mdxnet_models_dir=mdxnet_models_dir,
+        mdx_model_params=mdx_model_params,
     )
+    audio_out_path = extract_audio_process.extract_audio()
 
     display_progress(
         "[~] Separating Main Vocals from Backup Vocals...", 0.2, is_webui, progress
     )
-    backup_vocals_path, main_vocals_path = run_mdx(
-        mdx_model_params,
-        song_output_dir,
-        os.path.join(mdxnet_models_dir, "UVR_MDXNET_KARA_2.onnx"),
-        vocals_path,
-        suffix="Backup",
-        invert_suffix="Main",
-        denoise=True,
-    )
 
     display_progress("[~] Applying DeReverb to Vocals...", 0.3, is_webui, progress)
-    _, main_vocals_dereverb_path = run_mdx(
-        mdx_model_params,
-        song_output_dir,
-        os.path.join(mdxnet_models_dir, "Reverb_HQ_By_FoxJoy.onnx"),
-        main_vocals_path,
-        invert_suffix="DeReverb",
-        exclude_main=True,
-        denoise=True,
-    )
-
-    return (
-        orig_song_path,
-        vocals_path,
-        instrumentals_path,
-        main_vocals_path,
-        backup_vocals_path,
-        main_vocals_dereverb_path,
-    )
+    return audio_out_path
 
 
 def voice_change(
@@ -365,9 +352,6 @@ def song_cover_pipeline(
             "[~] Starting AI Cover Generation Pipeline...", 0, is_webui, progress
         )
 
-        with open(os.path.join(mdxnet_models_dir, "model_data.json")) as infile:
-            mdx_model_params = json.load(infile)
-
         # if youtube url
         if urlparse(song_input).scheme == "https":
             input_type = "yt"
@@ -389,33 +373,23 @@ def song_cover_pipeline(
 
         song_dir = os.path.join(output_dir, song_id)
 
+        with open(os.path.join(mdxnet_models_dir, "model_data.json")) as infile:
+            mdx_model_params = json.load(infile)
+
         if not os.path.exists(song_dir):
             os.makedirs(song_dir)
-            (
-                orig_song_path,
-                vocals_path,
-                instrumentals_path,
-                main_vocals_path,
-                backup_vocals_path,
-                main_vocals_dereverb_path,
-            ) = preprocess_song(
+            audio_out_path = preprocess_song(
                 song_input, mdx_model_params, song_id, is_webui, input_type, progress
             )
 
         else:
             vocals_path, main_vocals_path = None, None
+            # TODO: update function to aware of process type
             paths = get_audio_paths(song_dir)
 
             # if any of the audio files aren't available or keep intermediate files, rerun preprocess
             if any(path is None for path in paths) or keep_files:
-                (
-                    orig_song_path,
-                    vocals_path,
-                    instrumentals_path,
-                    main_vocals_path,
-                    backup_vocals_path,
-                    main_vocals_dereverb_path,
-                ) = preprocess_song(
+                audio_out_path = preprocess_song(
                     song_input,
                     mdx_model_params,
                     song_id,
@@ -423,22 +397,24 @@ def song_cover_pipeline(
                     input_type,
                     progress,
                 )
+            # Can remove this contional when using path objects
             else:
-                (
-                    orig_song_path,
-                    instrumentals_path,
-                    main_vocals_dereverb_path,
-                    backup_vocals_path,
-                ) = paths
+                pass
+                # (
+                #     orig_song_path,
+                #     instrumentals_path,
+                #     main_vocals_dereverb_path,
+                #     backup_vocals_path,
+                # ) = paths
 
         pitch_change = pitch_change * 12 + pitch_change_all
         ai_vocals_path = os.path.join(
             song_dir,
-            f'{os.path.splitext(os.path.basename(orig_song_path))[0]}_{voice_model}_p{pitch_change}_i{index_rate}_fr{filter_radius}_rms{rms_mix_rate}_pro{protect}_{f0_method}{"" if f0_method != "mangio-crepe" else f"_{crepe_hop_length}"}.wav',
+            f'{os.path.splitext(os.path.basename(audio_out_path.orig_song_path))[0]}_{voice_model}_p{pitch_change}_i{index_rate}_fr{filter_radius}_rms{rms_mix_rate}_pro{protect}_{f0_method}{"" if f0_method != "mangio-crepe" else f"_{crepe_hop_length}"}.wav',
         )
         ai_cover_path = os.path.join(
             song_dir,
-            f"{os.path.splitext(os.path.basename(orig_song_path))[0]} ({voice_model} Ver).{output_format}",
+            f"{os.path.splitext(os.path.basename(audio_out_path.orig_song_path))[0]} ({voice_model} Ver).{output_format}",
         )
 
         if not os.path.exists(ai_vocals_path):
@@ -447,7 +423,8 @@ def song_cover_pipeline(
             )
             voice_change(
                 voice_model,
-                main_vocals_dereverb_path,
+                # Only vocals is passed to rvc pipeline
+                audio_out_path.main_vocals_dereverb_path,
                 ai_vocals_path,
                 pitch_change,
                 f0_method,
@@ -459,6 +436,7 @@ def song_cover_pipeline(
                 is_webui,
             )
 
+        ### Post process audio
         display_progress(
             "[~] Applying audio effects to Vocals...", 0.8, is_webui, progress
         )
@@ -470,32 +448,29 @@ def song_cover_pipeline(
             display_progress(
                 "[~] Applying overall pitch change", 0.85, is_webui, progress
             )
-            instrumentals_path = pitch_shift(instrumentals_path, pitch_change_all)
-            backup_vocals_path = pitch_shift(backup_vocals_path, pitch_change_all)
+            audio_out_path.instrumentals_path = pitch_shift(
+                audio_out_path.instrumentals_path, pitch_change_all
+            )
+            audio_out_path.backup_vocals_path = pitch_shift(
+                audio_out_path.backup_vocals_path, pitch_change_all
+            )
 
         display_progress(
             "[~] Combining AI Vocals and Instrumentals...", 0.9, is_webui, progress
         )
         combine_audio(
-            [ai_vocals_mixed_path, backup_vocals_path, instrumentals_path],
+            [
+                ai_vocals_mixed_path,
+                audio_out_path.backup_vocals_path,
+                audio_out_path.instrumentals_path,
+            ],
             ai_cover_path,
             main_gain,
             backup_gain,
             inst_gain,
             output_format,
         )
-
-        if not keep_files:
-            display_progress(
-                "[~] Removing intermediate audio files...", 0.95, is_webui, progress
-            )
-            intermediate_files = [vocals_path, main_vocals_path, ai_vocals_mixed_path]
-            if pitch_change_all != 0:
-                intermediate_files += [instrumentals_path, backup_vocals_path]
-            for file in intermediate_files:
-                if file and os.path.exists(file):
-                    os.remove(file)
-
+        # cleanup_files(keep_files)
         return ai_cover_path
 
     except Exception as e:

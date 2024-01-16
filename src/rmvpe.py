@@ -302,6 +302,7 @@ class MelSpectrogram(torch.nn.Module):
             self.hann_window[keyshift_key] = torch.hann_window(win_length_new).to(
                 audio.device
             )
+        # TODO: pytorch does not support fft using mps backend
         fft = torch.stft(
             audio,
             n_fft=n_fft_new,
@@ -337,7 +338,9 @@ class RMVPE:
         self.model = model
         self.resample_kernel = {}
         self.is_half = is_half
-        if device is None:
+        # TODO: centralize device logic
+        # NOTE: fft is currently not supported by mps backend
+        if device is None or device == "mps":
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.mel_extractor = MelSpectrogram(
