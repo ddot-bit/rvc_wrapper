@@ -1,6 +1,6 @@
 from typing import Union
 
-from extract.audio.enums import ProcessType
+from audio.enums import ProcessType
 
 
 class MDXOutPath:
@@ -21,17 +21,18 @@ class MDXOutPath:
         self.main_vocals_dereverb_path: str = main_vocals_dereverb_path
 
 
-class OtherPath:
-    def __init__(self, orig_song_path, main_vocals_path) -> None:
+class SpleeterOutPath:
+    def __init__(self, orig_song_path, main_vocals_path, accompiant_path) -> None:
         self.orig_song_path = orig_song_path
         self.main_vocals_path = main_vocals_path
+        self.accompiant_path = accompiant_path
 
 
 def get_audio_path(
     process_type: ProcessType, **audio_paths
-) -> Union[MDXOutPath, OtherPath]:
+) -> Union[MDXOutPath, SpleeterOutPath]:
     out_path_factory = {
         ProcessType.MDX_PROCESS.value: MDXOutPath,
-        ProcessType.OTHER_PROCESS.value: OtherPath,
+        ProcessType.OTHER_PROCESS.value: SpleeterOutPath,
     }
     return out_path_factory[process_type](**audio_paths)

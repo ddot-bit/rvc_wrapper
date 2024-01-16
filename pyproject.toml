@@ -6,7 +6,7 @@ authors = ["ddot-bit <dpuducay@gmail.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.13"
+python = ">=3.9,<3.11"
 ffmpeg = "^1.4"
 requests = "^2.31.0"
 gradio = "3.39.0"
@@ -23,7 +23,8 @@ fairseq = "^0.12.2"
 faiss-cpu = "1.7.0"
 scipy = "^1.11.4"
 picklescan = "^0.0.13"
-modelscan = "0.4.1"
+spleeter = "^2.4.0"
+protobuf = "3.19"
 
 
 [build-system]

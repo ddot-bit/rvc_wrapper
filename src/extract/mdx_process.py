@@ -78,8 +78,3 @@ class MdxProcess:
             denoise=True,
         )
         return _, main_vocals_dereverb_path
-
-
-class OtherProcess:
-    def __init__(self) -> None:
-        pass

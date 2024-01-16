@@ -9,6 +9,9 @@ rvc_models/*/*.npy
 rvc_models/hubert_base.pt
 rvc_models/rmvpe.pt
 
+# Spleeter Models
+pretrained_models/2stems/*
+
 # Output
 song_output/*
 song_output/*/*.wav
