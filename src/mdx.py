@@ -102,6 +102,9 @@ class MDX:
         self.provider = (
             ["CUDAExecutionProvider"] if processor >= 0 else ["CPUExecutionProvider"]
         )
+        print(
+            f"MDX model backend device: {self.device.type}. MDX EXC provider: {self.provider}"
+        )
 
         self.model = params
 
@@ -263,12 +266,17 @@ class MDX:
         self.prog = tqdm(total=0)
         chunk = wave.shape[-1] // mt_threads
         waves = self.segment(wave, False, chunk)
+        # NOTE: NEED TO DETERMINE IF MULTIPROCESSING IS BETTER
+        # OR USE A LIB TO SOLVE THIS
+        # MAY BE ABLE TO APPLY MAP REDUCE HERE
 
         # Create a queue to hold the processed wave segments
         q = queue.Queue()
         threads = []
         for c, batch in enumerate(waves):
             mix_waves, pad, trim = self.pad_wave(batch)
+            # MAY TRY ASYNC IO OR CONCURRENT.FUTURES HERE
+            # Leverage mt_threads to
             self.prog.total = len(mix_waves) * mt_threads
             thread = threading.Thread(
                 target=self._process_wave, args=(mix_waves, trim, pad, q, c)
@@ -308,6 +316,7 @@ def run_mdx(
     # TODO: use generic solution to determine this
 
     if torch.cuda.is_available():
+        print("CUDA IS AVAILABLE, SETTING BACKEND TO CUDA")
         device = torch.device("cuda:0")
 
         device_properties = torch.cuda.get_device_properties(device)

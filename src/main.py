@@ -19,7 +19,7 @@ from pedalboard import Pedalboard, Reverb, Compressor, HighpassFilter
 from pedalboard.io import AudioFile
 from pydub import AudioSegment
 
-from transform.mdx_process import MdxProcess
+from transform.mdx_process import MdxProcess, MDXOutPath
 from rvc import Config, load_hubert, get_vc, rvc_infer
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -137,11 +137,11 @@ def get_audio_paths(song_dir):
         elif file.endswith("_Vocals_Backup.wav"):
             backup_vocals_path = os.path.join(song_dir, file)
 
-    return (
-        orig_song_path,
-        instrumentals_path,
-        main_vocals_dereverb_path,
-        backup_vocals_path,
+    return MDXOutPath(
+        orig_song_path=orig_song_path,
+        instrumentals_path=instrumentals_path,
+        backup_vocals_path=backup_vocals_path,
+        main_vocals_dereverb_path=main_vocals_dereverb_path,
     )
 
 
@@ -385,10 +385,14 @@ def song_cover_pipeline(
         else:
             vocals_path, main_vocals_path = None, None
             # TODO: update function to aware of process type
-            paths = get_audio_paths(song_dir)
+            audio_out_path = get_audio_paths(song_dir)
 
+            # Any required paths missing
             # if any of the audio files aren't available or keep intermediate files, rerun preprocess
-            if any(path is None for path in paths) or keep_files:
+            if (
+                any(path is None for path in audio_out_path.required_paths)
+                or keep_files
+            ):
                 audio_out_path = preprocess_song(
                     song_input,
                     mdx_model_params,
@@ -397,15 +401,6 @@ def song_cover_pipeline(
                     input_type,
                     progress,
                 )
-            # Can remove this contional when using path objects
-            else:
-                pass
-                # (
-                #     orig_song_path,
-                #     instrumentals_path,
-                #     main_vocals_dereverb_path,
-                #     backup_vocals_path,
-                # ) = paths
 
         pitch_change = pitch_change * 12 + pitch_change_all
         ai_vocals_path = os.path.join(
