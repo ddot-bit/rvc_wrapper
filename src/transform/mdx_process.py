@@ -2,7 +2,7 @@ from typing import Union
 import os
 
 from mdx import run_mdx
-from extract.audio.paths import MDXOutPath
+from transform.paths import MDXOutPath
 
 
 class MdxProcess:

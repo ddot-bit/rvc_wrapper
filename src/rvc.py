@@ -172,7 +172,7 @@ def rvc_infer(
     rms_mix_rate,
     protect,
     crepe_hop_length,
-    vc,
+    vc: VC,
     hubert_model,
 ):
     audio = load_audio(input_path, 16000)

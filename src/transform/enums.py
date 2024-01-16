@@ -3,4 +3,4 @@ from enum import Enum
 
 class ProcessType(Enum):
     MDX_PROCESS = "MDX"
-    OTHER_PROCESS = "OTHER"
+    OTHER_PROCESS = "SPLEETER"
