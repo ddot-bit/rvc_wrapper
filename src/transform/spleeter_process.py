@@ -37,7 +37,8 @@ class SpleeterProcess:
 
     def load_audio(self):
         audio_loader = AudioAdapter.default()
-        path = "/Users/diegopuducay/repos/rvc_wrapper/song_output/qxJ_f67YW8Y/21 Savage - A Lot (Lyrics) (rick Ver).mp3"
+        # TODO: integrate source audio file path
+        path = "<PATH TO SOURCE FILE>"
         waveform, _ = audio_loader.load(path, sample_rate=self.SAMPLE_RATE)
         return waveform
 
