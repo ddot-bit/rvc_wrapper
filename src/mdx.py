@@ -1,8 +1,6 @@
 import gc
 import hashlib
 import os
-import queue
-import threading
 import warnings
 
 import librosa
@@ -10,6 +8,8 @@ import numpy as np
 import onnxruntime as ort
 import soundfile as sf
 import torch
+import torch.multiprocessing as mp
+from torch.multiprocessing import Queue
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
@@ -20,6 +20,31 @@ stem_naming = {
     "Drums": "Drumless",
     "Bass": "Bassless",
 }
+mp.set_start_method("fork")
+
+
+class WrapInferenceSession:
+    def __init__(self, model_path, providers):
+        """Allow InferenceSession to be serializable
+        Refrence:
+            - https://github.com/microsoft/onnxruntime/pull/800#issuecomment-844326099
+            - https://github.com/microsoft/onnxruntime/issues/7846
+
+        Args:
+            onnx_bytes (_type_): _description_
+        """
+        self.onnx_bytes = model_path
+        self.sess = ort.InferenceSession(self.onnx_bytes, providers=providers)
+
+    def run(self, *args):
+        return self.sess.run(*args)
+
+    def __getstate__(self):
+        return {"onnx_bytes": self.onnx_bytes}
+
+    def __setstate__(self, values):
+        self.onnx_bytes = values["onnx_bytes"]
+        self.sess = ort.InferenceSession(self.onnx_bytes)
 
 
 class MDXModel:
@@ -109,14 +134,16 @@ class MDX:
         self.model = params
 
         # Load the ONNX model using ONNX Runtime
-        self.ort = ort.InferenceSession(model_path, providers=self.provider)
+        self.ort = WrapInferenceSession(model_path=model_path, providers=self.provider)
         # Preload the model for faster performance
         self.ort.run(
             None, {"input": torch.rand(1, 4, params.dim_f, params.dim_t).numpy()}
         )
-        self.process = lambda spec: self.ort.run(None, {"input": spec.cpu().numpy()})[0]
 
         self.prog = None
+
+    def process(self, spec):
+        return self.ort.run(None, {"input": spec.cpu().numpy()})[0]
 
     @staticmethod
     def get_hash(model_path):
@@ -218,7 +245,7 @@ class MDX:
 
         return mix_waves, pad, trim
 
-    def _process_wave(self, mix_waves, trim, pad, q: queue.Queue, _id: int):
+    def _process_wave(self, mix_waves, trim, pad, _id: int, q: Queue = None):
         """
         Process each wave segment in a multi-threaded environment
 
@@ -226,7 +253,7 @@ class MDX:
             mix_waves: (torch.Tensor) Wave segments to be processed
             trim: (int) Number of samples trimmed during padding
             pad: (int) Number of samples padded during padding
-            q: (queue.Queue) Queue to hold the processed wave segments
+            q: (Queue) Queue to hold the processed wave segments
             _id: (int) Identifier of the processed wave segment
 
         Returns:
@@ -235,8 +262,7 @@ class MDX:
         mix_waves = mix_waves.split(1)
         with torch.no_grad():
             pw = []
-            for mix_wave in mix_waves:
-                self.prog.update()
+            for mix_wave in tqdm(mix_waves, desc="[~] Multi-Process MDX Waves"):
                 spec = self.model.stft(mix_wave)
                 processed_spec = torch.tensor(self.process(spec))
                 processed_wav = self.model.istft(processed_spec.to(self.device))
@@ -249,7 +275,7 @@ class MDX:
                 )
                 pw.append(processed_wav)
         processed_signal = np.concatenate(pw, axis=-1)[:, :-pad]
-        q.put({_id: processed_signal})
+        # q.put({_id: processed_signal})
         return processed_signal
 
     def process_wave(self, wave: np.array, mt_threads=1):
@@ -263,37 +289,21 @@ class MDX:
         Returns:
             numpy array: Processed wave array
         """
-        self.prog = tqdm(total=0)
-        chunk = wave.shape[-1] // mt_threads
+        # Will use only half of cpu cores
+        num_processes = max(mp.cpu_count() // 2, 1)
+        # Reduce thread switching
+        # https://pytorch.org/docs/stable/notes/multiprocessing.html
+        torch.set_num_threads(mp.cpu_count() // num_processes)
+        chunk = wave.shape[-1] // num_processes
         waves = self.segment(wave, False, chunk)
-        # NOTE: NEED TO DETERMINE IF MULTIPROCESSING IS BETTER
-        # OR USE A LIB TO SOLVE THIS
-        # MAY BE ABLE TO APPLY MAP REDUCE HERE
-
-        # Create a queue to hold the processed wave segments
-        q = queue.Queue()
-        threads = []
+        wave_batches = []
         for c, batch in enumerate(waves):
             mix_waves, pad, trim = self.pad_wave(batch)
-            # MAY TRY ASYNC IO OR CONCURRENT.FUTURES HERE
-            # Leverage mt_threads to
-            self.prog.total = len(mix_waves) * mt_threads
-            thread = threading.Thread(
-                target=self._process_wave, args=(mix_waves, trim, pad, q, c)
-            )
-            thread.start()
-            threads.append(thread)
-        for thread in threads:
-            thread.join()
-        self.prog.close()
+            wave_batches.append((mix_waves, trim, pad, c))
 
-        processed_batches = []
-        while not q.empty():
-            processed_batches.append(q.get())
-        processed_batches = [
-            list(wave.values())[0]
-            for wave in sorted(processed_batches, key=lambda d: list(d.keys())[0])
-        ]
+        with mp.Pool(processes=num_processes) as pool:
+            processed_batches = pool.starmap(self._process_wave, wave_batches)
+
         assert len(processed_batches) == len(
             waves
         ), "Incomplete processed batches, please reduce batch size!"
