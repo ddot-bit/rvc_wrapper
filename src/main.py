@@ -389,10 +389,7 @@ def song_cover_pipeline(
 
             # Any required paths missing
             # if any of the audio files aren't available or keep intermediate files, rerun preprocess
-            if (
-                any(path is None for path in audio_out_path.required_paths)
-                or keep_files
-            ):
+            if audio_out_path.is_a_required_audio_missing() or keep_files:
                 audio_out_path = preprocess_song(
                     song_input,
                     mdx_model_params,

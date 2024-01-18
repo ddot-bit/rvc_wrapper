@@ -19,7 +19,7 @@ class MDXOutPath:
         self.main_vocals_dereverb_path: str = main_vocals_dereverb_path
 
     @property
-    def required_paths(self) -> list:
+    def required_paths(self) -> set:
         # any files that are required to be present
         req_set = {
             "orig_song_path",
@@ -27,7 +27,10 @@ class MDXOutPath:
             "backup_vocals_path",
             "main_vocals_dereverb_path",
         }
-        return [req_file for req_file, path in vars(self).items()]
+        return req_set
+
+    def is_a_required_audio_missing(self):
+        return any([True for req_file, path in vars(self).items() if path is None])
 
 
 class SpleeterOutPath:
