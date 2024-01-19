@@ -9,6 +9,8 @@ import onnxruntime as ort
 import soundfile as sf
 import torch
 import torch.multiprocessing as mp
+
+import ray
 from torch.multiprocessing import Queue
 from tqdm import tqdm
 
@@ -20,7 +22,13 @@ stem_naming = {
     "Drums": "Drumless",
     "Bass": "Bassless",
 }
-mp.set_start_method("fork")
+TOTAL_CPUS = mp.cpu_count()
+TOTAL_GPUS = torch.cuda.device_count()
+NUM_PROCESSES = max(TOTAL_GPUS // 2, 1)
+if ray.is_initialized():
+    pass
+else:
+    ray.init(num_cpus=NUM_PROCESSES, num_gpus=TOTAL_GPUS / NUM_PROCESSES)
 
 
 class WrapInferenceSession:
@@ -40,9 +48,11 @@ class WrapInferenceSession:
         return self.sess.run(*args)
 
     def __getstate__(self):
+        # Object being pickeled
         return {"onnx_bytes": self.onnx_bytes}
 
     def __setstate__(self, values):
+        # Object unpicked with some values
         self.onnx_bytes = values["onnx_bytes"]
         self.sess = ort.InferenceSession(self.onnx_bytes)
 
@@ -245,7 +255,8 @@ class MDX:
 
         return mix_waves, pad, trim
 
-    def _process_wave(self, mix_waves, trim, pad, _id: int, q: Queue = None):
+    @ray.remote(num_cpus=NUM_PROCESSES, num_gpus=TOTAL_GPUS / NUM_PROCESSES)
+    def _process_wave(self, model, mix_waves, trim, pad, _id: int, q: Queue = None):
         """
         Process each wave segment in a multi-threaded environment
 
@@ -262,10 +273,10 @@ class MDX:
         mix_waves = mix_waves.split(1)
         with torch.no_grad():
             pw = []
-            for mix_wave in tqdm(mix_waves, desc="[~] Multi-Process MDX Waves"):
-                spec = self.model.stft(mix_wave)
+            for mix_wave in tqdm(mix_waves, desc=f"[~] Multi-Process:{_id} MDX Waves"):
+                spec = model.stft(mix_wave)
                 processed_spec = torch.tensor(self.process(spec))
-                processed_wav = self.model.istft(processed_spec.to(self.device))
+                processed_wav = model.istft(processed_spec.to(self.device))
                 processed_wav = (
                     processed_wav[:, :, trim:-trim]
                     .transpose(0, 1)
@@ -276,7 +287,7 @@ class MDX:
                 pw.append(processed_wav)
         processed_signal = np.concatenate(pw, axis=-1)[:, :-pad]
         # q.put({_id: processed_signal})
-        return processed_signal
+        return {_id: processed_signal}
 
     def process_wave(self, wave: np.array, mt_threads=1):
         """
@@ -290,19 +301,25 @@ class MDX:
             numpy array: Processed wave array
         """
         # Will use only half of cpu cores
-        num_processes = max(mp.cpu_count() // 2, 1)
+        num_processes = NUM_PROCESSES
         # Reduce thread switching
         # https://pytorch.org/docs/stable/notes/multiprocessing.html
-        torch.set_num_threads(mp.cpu_count() // num_processes)
+        # torch.set_num_threads(mp.cpu_count() // num_processes)
         chunk = wave.shape[-1] // num_processes
         waves = self.segment(wave, False, chunk)
         wave_batches = []
         for c, batch in enumerate(waves):
             mix_waves, pad, trim = self.pad_wave(batch)
-            wave_batches.append((mix_waves, trim, pad, c))
+            wave_batches.append(
+                self._process_wave.remote(self, self.model, mix_waves, trim, pad, c)
+            )
 
-        with mp.Pool(processes=num_processes) as pool:
-            processed_batches = pool.starmap(self._process_wave, wave_batches)
+        output = ray.get(wave_batches)
+        # Manually sort results by ProcessID
+        processed_batches = [
+            list(wave.values())[0]
+            for wave in sorted(output, key=lambda d: list(d.keys())[0])
+        ]
 
         assert len(processed_batches) == len(
             waves
@@ -315,6 +332,8 @@ def run_mdx(
     output_dir,
     model_path,
     filename,
+    mdx_model: MDXModel,
+    mdx_sess: MDX,
     exclude_main=False,
     exclude_inversion=False,
     suffix=None,
@@ -337,18 +356,10 @@ def run_mdx(
 
     m_threads = 1 if vram_gb < 8 else 2
 
-    model_hash = MDX.get_hash(model_path)
-    mp = model_params.get(model_hash)
-    model = MDXModel(
-        device,
-        dim_f=mp["mdx_dim_f_set"],
-        dim_t=2 ** mp["mdx_dim_t_set"],
-        n_fft=mp["mdx_n_fft_scale_set"],
-        stem_name=mp["primary_stem"],
-        compensation=mp["compensate"],
-    )
+    # Read models from object store
+    model = ray.get(mdx_model)
+    mdx_sess = ray.get(mdx_sess)
 
-    mdx_sess = MDX(model_path, model)
     wave, sr = librosa.load(filename, mono=False, sr=44100)
     # normalizing input wave gives better output
     peak = max(np.max(wave), abs(np.min(wave)))
