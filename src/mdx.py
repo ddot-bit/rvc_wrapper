@@ -1,8 +1,7 @@
 import gc
 import hashlib
 import os
-import queue
-import threading
+from typing import Optional
 import warnings
 
 import librosa
@@ -10,7 +9,9 @@ import numpy as np
 import onnxruntime as ort
 import soundfile as sf
 import torch
+import torch.multiprocessing as mp
 from tqdm import tqdm
+import ray
 
 warnings.filterwarnings("ignore")
 stem_naming = {
@@ -20,6 +21,36 @@ stem_naming = {
     "Drums": "Drumless",
     "Bass": "Bassless",
 }
+TOTAL_CPUS = mp.cpu_count()
+TOTAL_GPUS = torch.cuda.device_count()
+NUM_RAY_CPUS = max(TOTAL_GPUS // 2, 1)
+RAY_GPU_USAGE = NUM_RAY_CPUS / TOTAL_CPUS
+
+
+class WrapInferenceSession:
+    def __init__(self, model_path, providers):
+        """Allow InferenceSession to be serializable
+        Refrence:
+            - https://github.com/microsoft/onnxruntime/pull/800#issuecomment-844326099
+            - https://github.com/microsoft/onnxruntime/issues/7846
+
+        Args:
+            onnx_bytes (_type_): _description_
+        """
+        self.onnx_bytes = model_path
+        self.sess = ort.InferenceSession(self.onnx_bytes, providers=providers)
+
+    def run(self, *args):
+        return self.sess.run(*args)
+
+    def __getstate__(self):
+        # Object being pickeled
+        return {"onnx_bytes": self.onnx_bytes}
+
+    def __setstate__(self, values):
+        # Object unpicked with some values
+        self.onnx_bytes = values["onnx_bytes"]
+        self.sess = ort.InferenceSession(self.onnx_bytes)
 
 
 class MDXModel:
@@ -102,18 +133,23 @@ class MDX:
         self.provider = (
             ["CUDAExecutionProvider"] if processor >= 0 else ["CPUExecutionProvider"]
         )
+        print(
+            f"MDX model backend device: {self.device.type}. MDX EXC provider: {self.provider}"
+        )
 
         self.model = params
 
         # Load the ONNX model using ONNX Runtime
-        self.ort = ort.InferenceSession(model_path, providers=self.provider)
+        self.ort = WrapInferenceSession(model_path=model_path, providers=self.provider)
         # Preload the model for faster performance
         self.ort.run(
             None, {"input": torch.rand(1, 4, params.dim_f, params.dim_t).numpy()}
         )
-        self.process = lambda spec: self.ort.run(None, {"input": spec.cpu().numpy()})[0]
 
         self.prog = None
+
+    def process(self, spec):
+        return self.ort.run(None, {"input": spec.cpu().numpy()})[0]
 
     @staticmethod
     def get_hash(model_path):
@@ -215,7 +251,16 @@ class MDX:
 
         return mix_waves, pad, trim
 
-    def _process_wave(self, mix_waves, trim, pad, q: queue.Queue, _id: int):
+    @ray.remote(num_cpus=NUM_RAY_CPUS, num_gpus=RAY_GPU_USAGE)
+    def _process_wave(
+        self,
+        model: MDXModel,
+        mix_waves: torch.Tensor,
+        trim: int,
+        pad: int,
+        _id: int,
+        q: "Queue" = None,
+    ):
         """
         Process each wave segment in a multi-threaded environment
 
@@ -223,20 +268,22 @@ class MDX:
             mix_waves: (torch.Tensor) Wave segments to be processed
             trim: (int) Number of samples trimmed during padding
             pad: (int) Number of samples padded during padding
-            q: (queue.Queue) Queue to hold the processed wave segments
+            q: (Queue) Queue to hold the processed wave segments
             _id: (int) Identifier of the processed wave segment
 
         Returns:
             numpy array: Processed wave segment
         """
         mix_waves = mix_waves.split(1)
+        pid = os.getpid()
         with torch.no_grad():
             pw = []
-            for mix_wave in mix_waves:
-                self.prog.update()
-                spec = self.model.stft(mix_wave)
+            for mix_wave in tqdm(
+                mix_waves, desc=f"[~] Pid:{pid} Multi-Process:{_id} MDX Waves"
+            ):
+                spec = model.stft(mix_wave)
                 processed_spec = torch.tensor(self.process(spec))
-                processed_wav = self.model.istft(processed_spec.to(self.device))
+                processed_wav = model.istft(processed_spec.to(self.device))
                 processed_wav = (
                     processed_wav[:, :, trim:-trim]
                     .transpose(0, 1)
@@ -246,10 +293,10 @@ class MDX:
                 )
                 pw.append(processed_wav)
         processed_signal = np.concatenate(pw, axis=-1)[:, :-pad]
-        q.put({_id: processed_signal})
-        return processed_signal
+        # q.put({_id: processed_signal})
+        return {_id: processed_signal}
 
-    def process_wave(self, wave: np.array, mt_threads=1):
+    def process_wave(self, wave: np.array, m_threads: int = 1) -> np.array:
         """
         Process the wave array in a multi-threaded environment
 
@@ -260,32 +307,23 @@ class MDX:
         Returns:
             numpy array: Processed wave array
         """
-        self.prog = tqdm(total=0)
-        chunk = wave.shape[-1] // mt_threads
+        num_processes = NUM_RAY_CPUS
+        chunk = wave.shape[-1] // num_processes
         waves = self.segment(wave, False, chunk)
-
-        # Create a queue to hold the processed wave segments
-        q = queue.Queue()
-        threads = []
+        wave_batches = []
         for c, batch in enumerate(waves):
             mix_waves, pad, trim = self.pad_wave(batch)
-            self.prog.total = len(mix_waves) * mt_threads
-            thread = threading.Thread(
-                target=self._process_wave, args=(mix_waves, trim, pad, q, c)
+            wave_batches.append(
+                self._process_wave.remote(self, self.model, mix_waves, trim, pad, c)
             )
-            thread.start()
-            threads.append(thread)
-        for thread in threads:
-            thread.join()
-        self.prog.close()
 
-        processed_batches = []
-        while not q.empty():
-            processed_batches.append(q.get())
+        output = ray.get(wave_batches)
+        # Manually sort results by ProcessID
         processed_batches = [
             list(wave.values())[0]
-            for wave in sorted(processed_batches, key=lambda d: list(d.keys())[0])
+            for wave in sorted(output, key=lambda d: list(d.keys())[0])
         ]
+
         assert len(processed_batches) == len(
             waves
         ), "Incomplete processed batches, please reduce batch size!"
@@ -293,21 +331,40 @@ class MDX:
 
 
 def run_mdx(
-    model_params,
-    output_dir,
-    model_path,
-    filename,
-    exclude_main=False,
-    exclude_inversion=False,
-    suffix=None,
+    output_dir: str,
+    filename: str,
+    mdx_model_ref: MDXModel,
+    mdx_sess_ref: MDX,
+    exclude_main: Optional[bool] = False,
+    exclude_inversion: Optional[bool] = False,
+    suffix: Optional[str] = None,
     invert_suffix=None,
-    denoise=False,
-    keep_orig=True,
-    m_threads=2,
-):
+    denoise: Optional[bool] = False,
+    keep_orig: Optional[bool] = True,
+    m_threads: Optional[int] = 2,
+) -> tuple[str, str]:
+    """Function to run MDX pipeline using for voice extraction
+
+    Args:
+        output_dir (str): _description_
+        filename (str): _description_
+        mdx_model_ref (MDXModel): _description_
+        mdx_sess_ref (MDX): _description_
+        exclude_main (Optional[bool], optional): _description_. Defaults to False.
+        exclude_inversion (Optional[bool], optional): _description_. Defaults to False.
+        suffix (Optional[str], optional): _description_. Defaults to None.
+        invert_suffix (_type_, optional): _description_. Defaults to None.
+        denoise (Optional[bool], optional): _description_. Defaults to False.
+        keep_orig (Optional[bool], optional): _description_. Defaults to True.
+        m_threads (Optional[int], optional): _description_. Defaults to 2.
+
+    Returns:
+        (tuple[str, str]): _description_
+    """
     # TODO: use generic solution to determine this
 
     if torch.cuda.is_available():
+        print("CUDA IS AVAILABLE, SETTING BACKEND TO CUDA")
         device = torch.device("cuda:0")
 
         device_properties = torch.cuda.get_device_properties(device)
@@ -318,18 +375,10 @@ def run_mdx(
 
     m_threads = 1 if vram_gb < 8 else 2
 
-    model_hash = MDX.get_hash(model_path)
-    mp = model_params.get(model_hash)
-    model = MDXModel(
-        device,
-        dim_f=mp["mdx_dim_f_set"],
-        dim_t=2 ** mp["mdx_dim_t_set"],
-        n_fft=mp["mdx_n_fft_scale_set"],
-        stem_name=mp["primary_stem"],
-        compensation=mp["compensate"],
-    )
+    # Read models from object store
+    model = ray.get(mdx_model_ref)
+    mdx_sess = ray.get(mdx_sess_ref)
 
-    mdx_sess = MDX(model_path, model)
     wave, sr = librosa.load(filename, mono=False, sr=44100)
     # normalizing input wave gives better output
     peak = max(np.max(wave), abs(np.min(wave)))

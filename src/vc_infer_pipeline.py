@@ -326,6 +326,7 @@ class VC(object):
             if hasattr(self, "model_rmvpe") == False:
                 from rmvpe import RMVPE
 
+                # TODO: Need a dynamic way to locate files
                 self.model_rmvpe = RMVPE(
                     os.path.join(BASE_DIR, "rvc_models", "rmvpe.pt"),
                     is_half=self.is_half,
