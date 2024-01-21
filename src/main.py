@@ -189,7 +189,7 @@ def display_progress(message, percent, is_webui, progress=None):
 
 
 def preprocess_song(
-    song_input, mdx_model_params, song_id, is_webui, input_type, progress=None
+    song_input, mdxnet_models_dir, song_id, is_webui, input_type, progress=None
 ):
     keep_orig = False
     if input_type == "yt":
@@ -212,7 +212,6 @@ def preprocess_song(
         song_output_dir=song_output_dir,
         orig_song_path=orig_song_path,
         mdxnet_models_dir=mdxnet_models_dir,
-        mdx_model_params=mdx_model_params,
     )
     audio_out_path = extract_audio_process.extract_audio()
 
@@ -373,13 +372,10 @@ def song_cover_pipeline(
 
         song_dir = os.path.join(output_dir, song_id)
 
-        with open(os.path.join(mdxnet_models_dir, "model_data.json")) as infile:
-            mdx_model_params = json.load(infile)
-
         if not os.path.exists(song_dir):
             os.makedirs(song_dir)
             audio_out_path = preprocess_song(
-                song_input, mdx_model_params, song_id, is_webui, input_type, progress
+                song_input, mdxnet_models_dir, song_id, is_webui, input_type, progress
             )
 
         else:
@@ -392,7 +388,7 @@ def song_cover_pipeline(
             if audio_out_path.is_a_required_audio_missing() or keep_files:
                 audio_out_path = preprocess_song(
                     song_input,
-                    mdx_model_params,
+                    mdxnet_models_dir,
                     song_id,
                     is_webui,
                     input_type,

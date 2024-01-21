@@ -30,7 +30,9 @@ class MDXOutPath:
         return req_set
 
     def is_a_required_audio_missing(self):
-        return any([True for req_file, path in vars(self).items() if path is None])
+        return not all(
+            [True for req_file, path in vars(self).items() if path is not None]
+        )
 
 
 class SpleeterOutPath:

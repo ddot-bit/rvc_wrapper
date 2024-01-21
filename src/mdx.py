@@ -1,6 +1,7 @@
 import gc
 import hashlib
 import os
+from typing import Optional
 import warnings
 
 import librosa
@@ -9,10 +10,8 @@ import onnxruntime as ort
 import soundfile as sf
 import torch
 import torch.multiprocessing as mp
-
-import ray
-from torch.multiprocessing import Queue
 from tqdm import tqdm
+import ray
 
 warnings.filterwarnings("ignore")
 stem_naming = {
@@ -24,11 +23,8 @@ stem_naming = {
 }
 TOTAL_CPUS = mp.cpu_count()
 TOTAL_GPUS = torch.cuda.device_count()
-NUM_PROCESSES = max(TOTAL_GPUS // 2, 1)
-if ray.is_initialized():
-    pass
-else:
-    ray.init(num_cpus=NUM_PROCESSES, num_gpus=TOTAL_GPUS / NUM_PROCESSES)
+NUM_RAY_CPUS = max(TOTAL_GPUS // 2, 1)
+RAY_GPU_USAGE = NUM_RAY_CPUS / TOTAL_CPUS
 
 
 class WrapInferenceSession:
@@ -255,8 +251,16 @@ class MDX:
 
         return mix_waves, pad, trim
 
-    @ray.remote(num_cpus=NUM_PROCESSES, num_gpus=TOTAL_GPUS / NUM_PROCESSES)
-    def _process_wave(self, model, mix_waves, trim, pad, _id: int, q: Queue = None):
+    @ray.remote(num_cpus=NUM_RAY_CPUS, num_gpus=RAY_GPU_USAGE)
+    def _process_wave(
+        self,
+        model: MDXModel,
+        mix_waves: torch.Tensor,
+        trim: int,
+        pad: int,
+        _id: int,
+        q: "Queue" = None,
+    ):
         """
         Process each wave segment in a multi-threaded environment
 
@@ -271,9 +275,12 @@ class MDX:
             numpy array: Processed wave segment
         """
         mix_waves = mix_waves.split(1)
+        pid = os.getpid()
         with torch.no_grad():
             pw = []
-            for mix_wave in tqdm(mix_waves, desc=f"[~] Multi-Process:{_id} MDX Waves"):
+            for mix_wave in tqdm(
+                mix_waves, desc=f"[~] Pid:{pid} Multi-Process:{_id} MDX Waves"
+            ):
                 spec = model.stft(mix_wave)
                 processed_spec = torch.tensor(self.process(spec))
                 processed_wav = model.istft(processed_spec.to(self.device))
@@ -289,7 +296,7 @@ class MDX:
         # q.put({_id: processed_signal})
         return {_id: processed_signal}
 
-    def process_wave(self, wave: np.array, mt_threads=1):
+    def process_wave(self, wave: np.array, m_threads: int = 1) -> np.array:
         """
         Process the wave array in a multi-threaded environment
 
@@ -300,11 +307,7 @@ class MDX:
         Returns:
             numpy array: Processed wave array
         """
-        # Will use only half of cpu cores
-        num_processes = NUM_PROCESSES
-        # Reduce thread switching
-        # https://pytorch.org/docs/stable/notes/multiprocessing.html
-        # torch.set_num_threads(mp.cpu_count() // num_processes)
+        num_processes = NUM_RAY_CPUS
         chunk = wave.shape[-1] // num_processes
         waves = self.segment(wave, False, chunk)
         wave_batches = []
@@ -328,20 +331,36 @@ class MDX:
 
 
 def run_mdx(
-    model_params,
-    output_dir,
-    model_path,
-    filename,
-    mdx_model: MDXModel,
-    mdx_sess: MDX,
-    exclude_main=False,
-    exclude_inversion=False,
-    suffix=None,
+    output_dir: str,
+    filename: str,
+    mdx_model_ref: MDXModel,
+    mdx_sess_ref: MDX,
+    exclude_main: Optional[bool] = False,
+    exclude_inversion: Optional[bool] = False,
+    suffix: Optional[str] = None,
     invert_suffix=None,
-    denoise=False,
-    keep_orig=True,
-    m_threads=2,
-):
+    denoise: Optional[bool] = False,
+    keep_orig: Optional[bool] = True,
+    m_threads: Optional[int] = 2,
+) -> tuple[str, str]:
+    """Function to run MDX pipeline using for voice extraction
+
+    Args:
+        output_dir (str): _description_
+        filename (str): _description_
+        mdx_model_ref (MDXModel): _description_
+        mdx_sess_ref (MDX): _description_
+        exclude_main (Optional[bool], optional): _description_. Defaults to False.
+        exclude_inversion (Optional[bool], optional): _description_. Defaults to False.
+        suffix (Optional[str], optional): _description_. Defaults to None.
+        invert_suffix (_type_, optional): _description_. Defaults to None.
+        denoise (Optional[bool], optional): _description_. Defaults to False.
+        keep_orig (Optional[bool], optional): _description_. Defaults to True.
+        m_threads (Optional[int], optional): _description_. Defaults to 2.
+
+    Returns:
+        (tuple[str, str]): _description_
+    """
     # TODO: use generic solution to determine this
 
     if torch.cuda.is_available():
@@ -357,8 +376,8 @@ def run_mdx(
     m_threads = 1 if vram_gb < 8 else 2
 
     # Read models from object store
-    model = ray.get(mdx_model)
-    mdx_sess = ray.get(mdx_sess)
+    model = ray.get(mdx_model_ref)
+    mdx_sess = ray.get(mdx_sess_ref)
 
     wave, sr = librosa.load(filename, mono=False, sr=44100)
     # normalizing input wave gives better output
