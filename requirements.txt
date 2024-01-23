@@ -5,7 +5,6 @@ librosa == 0.10.1
 sox == 1.4.1
 yt-dlp == 2023.11.16
 pedalboard == 0.8.7
-onnxruntime == 1.16.3
 torch == 2.1.2
 ffmpeg-python == 0.2.0
 tqdm == 4.66.1
@@ -16,3 +15,5 @@ scipy == 1.11.4
 picklescan == 0.0.13
 spleeter == 2.4.0
 protobuf == 3.19
+# https://github.com/microsoft/onnxruntime/issues/18850
+onnxruntime-gpu==1.17.0 --index-url=https://pkgs.dev.azure.com/onnxruntime/onnxruntime/_packaging/onnxruntime-cuda-12/pypi/simple

@@ -31,7 +31,10 @@ class MDXOutPath:
 
     def is_a_required_audio_missing(self):
         return not all(
-            [True for req_file, path in vars(self).items() if path is not None]
+            [
+                req_file in self.required_paths and not path
+                for req_file, path in vars(self).items()
+            ]
         )
 
 
