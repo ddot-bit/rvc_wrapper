@@ -24,33 +24,36 @@ stem_naming = {
 TOTAL_CPUS = mp.cpu_count()
 TOTAL_GPUS = torch.cuda.device_count()
 NUM_RAY_CPUS = max(TOTAL_GPUS // 2, 1)
-RAY_GPU_USAGE = NUM_RAY_CPUS / TOTAL_CPUS
+RAY_GPU_USAGE = 0  # NUM_RAY_CPUS / TOTAL_CPUS
 
 
 class WrapInferenceSession:
-    def __init__(self, model_path, providers):
+    def __init__(self, model_path: str, providers: list[str]):
         """Allow InferenceSession to be serializable
         Refrence:
             - https://github.com/microsoft/onnxruntime/pull/800#issuecomment-844326099
             - https://github.com/microsoft/onnxruntime/issues/7846
 
         Args:
-            onnx_bytes (_type_): _description_
+            model_path (str): _description_
+            providers (list[str]): _description_
         """
         self.onnx_bytes = model_path
-        self.sess = ort.InferenceSession(self.onnx_bytes, providers=providers)
+        self.providers = providers
+        self.sess = ort.InferenceSession(self.onnx_bytes, providers=self.providers)
 
     def run(self, *args):
         return self.sess.run(*args)
 
     def __getstate__(self):
         # Object being pickeled
-        return {"onnx_bytes": self.onnx_bytes}
+        return {"onnx_bytes": self.onnx_bytes, "providers": self.providers}
 
     def __setstate__(self, values):
         # Object unpicked with some values
         self.onnx_bytes = values["onnx_bytes"]
-        self.sess = ort.InferenceSession(self.onnx_bytes)
+        self.providers = values["providers"]
+        self.sess = ort.InferenceSession(self.onnx_bytes, providers=self.providers)
 
 
 class MDXModel:
@@ -281,7 +284,8 @@ class MDX:
             for mix_wave in tqdm(
                 mix_waves, desc=f"[~] Pid:{pid} Multi-Process:{_id} MDX Waves"
             ):
-                spec = model.stft(mix_wave)
+                # Load input wave into device
+                spec = model.stft(mix_wave.to(self.device))
                 processed_spec = torch.tensor(self.process(spec))
                 processed_wav = model.istft(processed_spec.to(self.device))
                 processed_wav = (
@@ -292,6 +296,7 @@ class MDX:
                     .numpy()
                 )
                 pw.append(processed_wav)
+        torch.cuda.empty_cache()
         processed_signal = np.concatenate(pw, axis=-1)[:, :-pad]
         # q.put({_id: processed_signal})
         return {_id: processed_signal}
@@ -346,10 +351,10 @@ def run_mdx(
     """Function to run MDX pipeline using for voice extraction
 
     Args:
-        output_dir (str): _description_
-        filename (str): _description_
-        mdx_model_ref (MDXModel): _description_
-        mdx_sess_ref (MDX): _description_
+        output_dir (str): Directory of all audio files to be seperated
+        filename (str): The filename of the input audio file
+        mdx_model_ref (MDXModel): MDXModel instance
+        mdx_sess_ref (MDX): MDX instance
         exclude_main (Optional[bool], optional): _description_. Defaults to False.
         exclude_inversion (Optional[bool], optional): _description_. Defaults to False.
         suffix (Optional[str], optional): _description_. Defaults to None.
@@ -359,10 +364,9 @@ def run_mdx(
         m_threads (Optional[int], optional): _description_. Defaults to 2.
 
     Returns:
-        (tuple[str, str]): _description_
+        (tuple[str, str]): Tuple of 2 paths for decompiled audio files
     """
     # TODO: use generic solution to determine this
-
     if torch.cuda.is_available():
         print("CUDA IS AVAILABLE, SETTING BACKEND TO CUDA")
         device = torch.device("cuda:0")
@@ -376,8 +380,8 @@ def run_mdx(
     m_threads = 1 if vram_gb < 8 else 2
 
     # Read models from object store
-    model = ray.get(mdx_model_ref)
-    mdx_sess = ray.get(mdx_sess_ref)
+    model: MDXModel = ray.get(mdx_model_ref)
+    mdx_sess: MDX = ray.get(mdx_sess_ref)
 
     wave, sr = librosa.load(filename, mono=False, sr=44100)
     # normalizing input wave gives better output
